@@ -8,12 +8,14 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 data = pd.read_excel('datasets/PM_fail&solution_data.xlsx', sheet_name='Sheet1')
 print(data.columns)
-data = data.filter(items=['고장원인전처리', '고장조치라벨링'])
-data = data.rename(index=str, columns={'고장원인전처리': 'X', '고장조치라벨링': 'Y'})
+data = data.filter(items=['고장원인전처리', '고장조치라벨링', 'EquiGroup'])
+data = data.rename(index=str, columns={'고장원인전처리': 'X',
+                                       '고장조치라벨링': 'Y',
+                                       'EquiGroup': 'equip'})
 label_cnt = data.Y.value_counts()
 print(label_cnt)
 
-topx = 5
+topx = 2
 label_cnt.index[:topx]
 """ Top5 labels
 1) 수동 버튼 조작/점검/리셋 및 임시 조치 후 점검 요청    12965
@@ -33,6 +35,10 @@ def make_label(y, unique_label=label_cnt.index[:topx].values):
 
 labels = [make_label(x) for x in subdata.Y.values.tolist()]
 subdata['labels'] = labels
+
+equip = [make_label(x, unique_label=subdata.equip.unique()) for x in subdata.equip.values.tolist()]
+subdata['X_add'] = equip
+# subdata.loc[:,'X_add'] = equip
 
 # <character>
 def char(x):
