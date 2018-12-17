@@ -14,8 +14,12 @@ data = data.rename(index=str, columns={'고장원인전처리': 'X',
                                        'EquiGroup': 'equip'})
 label_cnt = data.Y.value_counts()
 print(label_cnt)
+print(data.equip.value_counts())
 
-topx = 2
+# 장비선택
+data = data[data.equip.isin(['Mounter'])]
+print(data.Y.value_counts())
+topx = 4
 label_cnt.index[:topx]
 """ Top5 labels
 1) 수동 버튼 조작/점검/리셋 및 임시 조치 후 점검 요청    12965
