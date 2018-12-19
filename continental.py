@@ -9,6 +9,10 @@ from keras.layers import Input, Dense, GRU, LSTM
 from keras.layers import Embedding
 from sklearn.preprocessing import LabelEncoder
 from layer_utils import Attention
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import confusion_matrix
+from sklearn.metrics import classification_report
+import functools
 
 
 class Continental:
@@ -50,10 +54,11 @@ class Continental:
     def _char(self, x):
         # <character>
         x = hgtk.text.decompose(x)
-        x = re.sub('\s+', '↔', x)
+        x = re.sub('\s+', ' ', x)
         return x
 
     def _sent2char(self, x):
+        """Deprecated method"""
         o = []
         for token in x:
             if hgtk.checker.is_hangul(token):
@@ -68,13 +73,20 @@ class Continental:
 
     def insert_columns(self, data):
         # add some columns
-        # labels = [self._make_label(x, unique_label=data.Y.unique()) for x in data.Y.values.tolist()]
+        # add label
         le = LabelEncoder()
         labels = le.fit_transform(data.Y)
         data.insert(data.shape[1], 'labels', labels)
-        X_split = [self._sent2char(x) for x in data.X.values.tolist()]
-        data.insert(data.shape[1], 'X_split', X_split)
 
+        # add one-hot equip
+        le = LabelEncoder()
+        equip = le.fit_transform(data.equip)
+        data.insert(data.shape[1], 'equip_index', equip)
+        self.num_euip = len(data.equip_index.unique())
+
+        # add char-level inputs
+        X_split = [self._char(x) for x in data.X.values.tolist()]
+        data.insert(data.shape[1], 'X_split', X_split)
         return data
 
     def savedata(self, data):
@@ -82,9 +94,9 @@ class Continental:
         data.to_pickle('datasets/subdata_E{}_C{}.pkl'.format(self.equipname, self.topk))
 
     def preprocessing(self, subdata):
-        tokenizer = text.Tokenizer(filters='', char_level=False)
+        tokenizer = text.Tokenizer(filters='', char_level=True)
         tokenizer.fit_on_texts(subdata.X_split.values)
-        tokenizer.index_word[0] = '<pad>'
+        # tokenizer.index_word[0] = '<pad>'
         print('number of chars:', len(tokenizer.index_word))  # except <pad>
         self.maxword = len(tokenizer.index_word)
         # tokenizer: char. level
@@ -94,17 +106,18 @@ class Continental:
         # padding
         X = sequence.pad_sequences(X, maxlen=self.maxlen, truncating='pre', padding='pre')
         # one-hot label
-        Y = keras.utils.to_categorical(subdata['labels'].values, num_classes=2)
+        Y = keras.utils.to_categorical(subdata['labels'].values, num_classes=self.topk)
         print(Y.shape)
-        return X, Y
+        X_equip = keras.utils.to_categorical(subdata['equip_index'].values)
+        return X, X_equip, Y
 
     def model(self):
         x = Input(shape=(self.maxlen,), dtype='int32')
-        h = Embedding(self.maxword, 64,
+        h = Embedding(self.maxword + 1, 64,
                       input_length=self.maxlen,
                       mask_zero=True)(x)
-        h = LSTM(128, return_sequences=False, unroll=True)(h)
-        # h = Attention(self.maxlen)(h)
+        h = LSTM(128, return_sequences=True, unroll=True)(h)
+        h = Attention(self.maxlen)(h)
         # h = Dense(64, activation='relu')(h)
         y = Dense(self.topk, activation='softmax')(h)
         model = Model(x, y)
@@ -113,6 +126,30 @@ class Continental:
         model.compile(loss='categorical_crossentropy',
                       optimizer=opt,
                       metrics=[keras.metrics.categorical_accuracy])
+        model.summary()
+        return model
+
+    def model_equip(self):
+        x = Input(shape=(self.maxlen,), dtype='int32')
+        x_equip = Input(shape=(self.num_euip,), dtype='float32')
+        h_equip = Dense(64, activation='relu')(x_equip)
+        h = Embedding(self.maxword + 1, 64,
+                      input_length=self.maxlen,
+                      mask_zero=True)(x)
+        h = LSTM(128, return_sequences=True, unroll=True)(h)
+        h = Attention(self.maxlen)(h)
+        h = keras.layers.concatenate([h, h_equip])
+        y = Dense(self.topk, activation='softmax')(h)
+        model = Model([x, x_equip], y)
+
+        opt = keras.optimizers.Adam()
+
+        def top3_acc(y_true, y_pred):
+            return keras.metrics.top_k_categorical_accuracy(y_true, y_pred, k=3)
+
+        model.compile(loss='categorical_crossentropy',
+                      optimizer=opt,
+                      metrics=['acc', top3_acc])
         model.summary()
         return model
 
@@ -125,24 +162,42 @@ if __name__ == '__main__':
     # make dataset
     path = 'datasets/PM_fail&solution_data.xlsx'
     cont = Continental(path)
-    topk = 2
+    topk = 10
 
     data = cont.read_excel()
     data = cont.select_equip_by_name(data, equipname=None)
     data = cont.select_labels_by_index(data, topk)
     data = cont.insert_columns(data)
     cont.savedata(data)
-
     # data = pd.read_pickle('datasets/subdata_Eall_C2.pkl')
-    cont.topk=topk
+    # cont.topk=topk
     # modeling
-    X, Y = cont.preprocessing(data)
-    model = cont.model()
+    X, X_equip, Y = cont.preprocessing(data)
+    # model = cont.model()
+    model = cont.model_equip()
 
     # train
-    chkpoint = keras.callbacks.ModelCheckpoint('history/aa.hdf5', save_best_only=True, save_weights_only=True)
-    hist = model.fit(X, Y, epochs=150, batch_size=256,
-                     shuffle=True, validation_split=0.2,
+    train_indices, test_indices = train_test_split(
+        np.arange(len(X)), test_size=0.2, shuffle=True,
+        random_state=123123
+    )
+    X_train, X_equip_train, Y_train = X[train_indices], X_equip[train_indices], Y[train_indices]
+    X_test, X_equip_test, Y_test = X[test_indices], X_equip[test_indices], Y[test_indices]
+
+    model_path = 'history/aa.hdf5'
+    chkpoint = keras.callbacks.ModelCheckpoint(model_path, save_best_only=True, save_weights_only=True)
+    hist = model.fit([X_train, X_equip_train], Y_train, epochs=150, batch_size=256,
+                     shuffle=True, validation_split=0.1,
                      verbose=2, callbacks=[chkpoint])
 
-    # '베큠로더 픽업에러및 spi 틀어짐에러발생 픽업포지션재설정 spi 재테스트'
+    np.save('hist.npy', hist.history)
+
+    # evaluation
+    model.load_weights(model_path)
+    Y_pred = model.predict([X_test, X_equip_test], batch_size=256)
+    cm = confusion_matrix(np.argmax(Y_test, axis=-1), np.argmax(Y_pred, axis=-1))
+    print(classification_report(np.argmax(Y_test, axis=-1), np.argmax(Y_pred, axis=-1)))
+
+    model.evaluate([X_test, X_equip_test], Y_test, batch_size=256)
+
+
